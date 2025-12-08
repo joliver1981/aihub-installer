@@ -1,7 +1,7 @@
 [Setup]
 AppId={{999ECAE8-60BF-4566-B61D-51F5BFAC7B66}
 AppName=AIHub
-AppVersion=1.4.r11
+AppVersion=1.4.r14
 AppPublisher=EveriAI, LLC.
 AppPublisherURL=https://www.ai-hub-api.azurewebsites.net/
 AppSupportURL=https://www.everiai.ai/
@@ -651,6 +651,43 @@ begin
       else
         Log('APP_ROOT already present: ' + AppRootVal);
       // --- END NEW ---
+      
+      // --- VERIFY: WORKFLOW_TRAINING_CAPTURE_ENABLED ---
+      if not EnsureEnvKeyExists(EnvConfigFile, 'WORKFLOW_TRAINING_CAPTURE_ENABLED', 'false') then
+      begin
+        // Don't abort the whole install; just warn. Services can still run,
+        MsgBox('Warning: Failed to write WORKFLOW_TRAINING_CAPTURE_ENABLED to .env.' + #13#10 +
+               'You may need to add it manually',
+               mbError, MB_OK);
+      end;
+
+      // --- VERIFY: WORKFLOW_TRAINING_CAPTURE_PATH ---
+      if not EnsureEnvKeyExists(EnvConfigFile, 'WORKFLOW_TRAINING_CAPTURE_PATH', './training_data/workflows') then
+      begin
+        // Don't abort the whole install; just warn. Services can still run,
+        MsgBox('Warning: Failed to write WORKFLOW_TRAINING_CAPTURE_PATH to .env.' + #13#10 +
+               'You may need to add it manually',
+               mbError, MB_OK);
+      end;
+
+      // --- VERIFY: USE_TWO_STAGE_ARCHITECTURE ---
+      if not EnsureEnvKeyExists(EnvConfigFile, 'USE_TWO_STAGE_ARCHITECTURE', 'true') then
+      begin
+        // Don't abort the whole install; just warn. Services can still run,
+        MsgBox('Warning: Failed to write USE_TWO_STAGE_ARCHITECTURE to .env.' + #13#10 +
+               'You may need to add it manually',
+               mbError, MB_OK);
+      end;
+      
+      // --- VERIFY: COMMAND_GENERATOR_DEPLOYMENT ---
+      if not EnsureEnvKeyExists(EnvConfigFile, 'COMMAND_GENERATOR_DEPLOYMENT', '') then
+      begin
+        // Don't abort the whole install; just warn. Services can still run,
+        MsgBox('Warning: Failed to write COMMAND_GENERATOR_DEPLOYMENT to .env.' + #13#10 +
+               'You may need to add it manually',
+               mbError, MB_OK);
+      end;
+      
     end
     else
     begin
