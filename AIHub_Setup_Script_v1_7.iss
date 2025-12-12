@@ -1,7 +1,7 @@
 [Setup]
 AppId={{999ECAE8-60BF-4566-B61D-51F5BFAC7B66}
 AppName=AIHub
-AppVersion=1.4.r14
+AppVersion=1.5
 AppPublisher=EveriAI, LLC.
 AppPublisherURL=https://www.ai-hub-api.azurewebsites.net/
 AppSupportURL=https://www.everiai.ai/
@@ -39,6 +39,7 @@ Source: "C:\src\aihub-client\dist\job_scheduler_service.exe"; DestDir: "{app}"; 
 Source: "C:\src\aihub-client\dist\wsgi_vector_api.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "C:\src\aihub-client\dist\wsgi_agent_api.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "C:\src\aihub-client\dist\wsgi_knowledge_api.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "C:\src\aihub-client\dist\wsgi_executor_service.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "C:\src\nssm-2.24\win64\nssm.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "C:\src\aihub-client\dist\.env"; DestDir: "{app}"; Flags: ignoreversion onlyifdoesntexist
 Source: "C:\src\aihub-client\dist\core_tools.yaml"; DestDir: "{app}"; Flags: ignoreversion 
@@ -217,7 +218,7 @@ end;
 procedure StopAndRemoveServices();
 var
   ResultCode: Integer;
-  Services: array[0..6] of String;
+  Services: array[0..7] of String;
   I: Integer;
 begin
   Services[0] := 'AIHub';
@@ -227,6 +228,7 @@ begin
   Services[4] := 'AIHubVectorAPI';
   Services[5] := 'AIHubAgentAPI';
   Services[6] := 'AIHubKnowledgeAPI';
+  Services[7] := 'AIHubExecutorService';
   
   Log('Stopping and removing existing services...');
   
@@ -604,6 +606,21 @@ begin
   Exec(ExpandConstant('{app}\nssm.exe'), 'start AIHubKnowledgeAPI', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Log('AIHubKnowledgeAPI service started');
   
+  // Register the executor service
+  ShellExec('', ExpandConstant('{app}\nssm.exe'),
+    'install AIHubExecutorService "' + ExpandConstant('{app}\wsgi_executor_service.exe') + '"',
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+
+  if not UseSystemAccount then
+  begin
+    Exec(ExpandConstant('{app}\nssm.exe'), 'set AIHubExecutorService ObjectName ' + LocalDomain + '\' + LocalUser + ' ' + LocalPwd, '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  end;
+  
+  Exec(ExpandConstant('{app}\nssm.exe'), 'set AIHubExecutorService Description "AI Hub executor service"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  ConfigureServiceRecovery('AIHubExecutorService');
+  Exec(ExpandConstant('{app}\nssm.exe'), 'start AIHubExecutorService', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Log('AIHubExecutorService service started');
+  
   Log('All services installed and started successfully');
 end;
 
@@ -706,6 +723,15 @@ begin
                mbError, MB_OK);
       end;
       
+      // --- VERIFY: EXECUTOR_SERVICE_THREADS ---
+      if not EnsureEnvKeyExists(EnvConfigFile, 'EXECUTOR_SERVICE_THREADS', '4') then
+      begin
+        // Don't abort the whole install; just warn. Services can still run,
+        MsgBox('Warning: Failed to write EXECUTOR_SERVICE_THREADS to .env.' + #13#10 +
+               'You may need to add it manually',
+               mbError, MB_OK);
+      end;
+      
     end
     else
     begin
@@ -764,6 +790,8 @@ Filename: "{app}\nssm.exe"; Parameters: "stop AIHubAgentAPI"; Flags: runhidden w
 Filename: "{app}\nssm.exe"; Parameters: "remove AIHubAgentAPI confirm"; Flags: runhidden
 Filename: "{app}\nssm.exe"; Parameters: "stop AIHubKnowledgeAPI"; Flags: runhidden waituntilterminated
 Filename: "{app}\nssm.exe"; Parameters: "remove AIHubKnowledgeAPI confirm"; Flags: runhidden
+Filename: "{app}\nssm.exe"; Parameters: "stop AIHubExecutorService"; Flags: runhidden waituntilterminated
+Filename: "{app}\nssm.exe"; Parameters: "remove AIHubExecutorService confirm"; Flags: runhidden
 
 [UninstallDelete]
 Type: files; Name: "{app}\*.exe"
