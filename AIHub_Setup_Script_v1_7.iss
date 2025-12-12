@@ -232,7 +232,7 @@ begin
   
   Log('Stopping and removing existing services...');
   
-  for I := 0 to 6 do
+  for I := 0 to 7 do
   begin
     // Stop service
     Log('Stopping service: ' + Services[I]);
