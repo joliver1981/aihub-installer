@@ -3,28 +3,35 @@ AppId={{999ECAE8-60BF-4566-B61D-51F5BFAC7B66}
 AppName=AIHub
 AppVersion=1.6
 AppPublisher=EveriAI, LLC.
-AppPublisherURL=https://www.ai-hub-api.azurewebsites.net/
+AppPublisherURL=https://www.everiai.ai/
 AppSupportURL=https://www.everiai.ai/
-AppUpdatesURL=https://www.ai-hub-api.azurewebsites.net/
+AppUpdatesURL=https://github.com/everiai-aihub/releases
 DefaultDirName={autopf}\AIHub
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 DefaultGroupName=AIHub
 DisableProgramGroupPage=yes
 LicenseFile=C:\src\aihub-client\static\license.txt
-OutputBaseFilename=AIHub Setup
+OutputBaseFilename=AIHub.Setup.v1.6
 Compression=lzma
 SolidCompression=yes
 WizardStyle=modern
+; For auto-updates - we handle service stopping ourselves
+CloseApplications=no
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
+
+[Messages]
+FinishedLabelNoIcons=Setup has finished installing [name] on your computer.%n%nAI Hub is now running as a local web service.%n%nOpen your browser to access the application.
+FinishedLabel=Setup has finished installing [name] on your computer.%n%nAI Hub is now running and will open in your browser.%n%nYou can also access it anytime at the configured port.
 
 [Dirs]
 Name: "{app}\cache"
 Name: "{app}\logs"
 Name: "{app}\tools"
 Name: "{app}\tmp"
+Name: "{app}\data"
 Name: "{app}\agent_environments"
 Name: "{app}\agent_environments\python-bundle"
 Name: "{app}\agent_environments\python-bundle-requirements"
@@ -54,7 +61,21 @@ Source: "C:\src\aihub-client\dist\static\icons\*"; DestDir: "{app}\static\icons"
 
 [Icons]
 Name: "{group}\AIHub"; Filename: "{app}\app.exe"
+Name: "{group}\Open AI Hub in Browser"; Filename: "http://localhost:5001"; Comment: "Open AI Hub in your web browser"
 Name: "{group}\{cm:UninstallProgram,AIHub}"; Filename: "{uninstallexe}"
+; Desktop shortcut - opens browser directly
+Name: "{commondesktop}\AI Hub"; Filename: "http://localhost:5001"; IconFilename: "{app}\static\icons\aihub.ico"; Comment: "Open AI Hub in your browser"; Tasks: desktopicon
+
+[Tasks]
+Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"
+
+[Run]
+; Open browser after fresh install (not during upgrades, not during silent install)
+Filename: "cmd.exe"; \
+  Parameters: "/c timeout /t 8 /nobreak >nul && start http://localhost:5001"; \
+  Description: "Open AI Hub in browser"; \
+  Flags: postinstall nowait skipifsilent runhidden shellexec; \
+  Check: IsNewInstallation
 
 [Code]
 var
@@ -66,9 +87,15 @@ var
   IsUpgrade: Boolean;
   ExistingApiKey: String;
   ExistingInstallPath: String;
+  ConfiguredPort: String;
 
 const
   APIValidationURL = 'https://ai-hub-api.azurewebsites.net/validate_license';
+
+function IsNewInstallation(): Boolean;
+begin
+  Result := not IsUpgrade;
+end;
 
 function GetInstalledVersion(): String;
 var
@@ -85,7 +112,7 @@ begin
     if Result = '' then
     begin
       if FileExists('c:\Program Files\AIHub\.env') then
-        Result := ExpandConstant('{AppVersion}');
+        Result := ExpandConstant('{#SetupSetting("AppVersion")}');
     end;
 end;
 
@@ -124,6 +151,25 @@ begin
       end;
     end;
   end;
+end;
+
+function GetConfiguredPort(): String;
+var
+  EnvPath: String;
+  PortValue: String;
+begin
+  Result := '5001';  // Default port
+  
+  EnvPath := ExpandConstant('{app}\.env');
+  if FileExists(EnvPath) then
+  begin
+    PortValue := ReadEnvFileFromPath(EnvPath, 'HOST_PORT');
+    if PortValue <> '' then
+      Result := PortValue;
+  end;
+  
+  Log('Configured port: ' + Result);
+  ConfiguredPort := Result;
 end;
 
 function EnsureEnvKeyExists(const FilePath, Key, Value: String): Boolean;
@@ -215,10 +261,22 @@ begin
     SW_HIDE, ewWaitUntilTerminated, ResultCode);
 end;
 
+// =============================================================================
+// FIXED: Robust service stopping for NSSM-managed services
+// 
+// Root cause: v1.8 added CloseApplications=no and moved service stopping to
+// PrepareToInstall(). Combined with sc.exe (which doesn't properly terminate
+// NSSM-managed processes), this left orphaned processes after upgrade.
+//
+// Fix: Use NSSM commands to properly stop services, then force-kill any
+// remaining processes to ensure clean file replacement.
+// =============================================================================
 procedure StopAndRemoveServices();
 var
   ResultCode: Integer;
   Services: array[0..7] of String;
+  Executables: array[0..7] of String;
+  NssmPath: String;
   I: Integer;
 begin
   Services[0] := 'AIHub';
@@ -230,22 +288,106 @@ begin
   Services[6] := 'AIHubKnowledgeAPI';
   Services[7] := 'AIHubExecutorService';
   
-  Log('Stopping and removing existing services...');
+  // Corresponding executable names for taskkill
+  Executables[0] := 'app.exe';
+  Executables[1] := 'document_api_server.exe';
+  Executables[2] := 'document_job_processor.exe';
+  Executables[3] := 'job_scheduler_service.exe';
+  Executables[4] := 'wsgi_vector_api.exe';
+  Executables[5] := 'wsgi_agent_api.exe';
+  Executables[6] := 'wsgi_knowledge_api.exe';
+  Executables[7] := 'wsgi_executor_service.exe';
   
-  for I := 0 to 7 do
+  Log('========================================');
+  Log('STOPPING AND REMOVING SERVICES');
+  Log('========================================');
+  
+  // Determine NSSM path - try install path first, then default
+  NssmPath := AddBackslash(ExistingInstallPath) + 'nssm.exe';
+  if not FileExists(NssmPath) then
   begin
-    // Stop service
-    Log('Stopping service: ' + Services[I]);
-    Exec('sc.exe', 'stop "' + Services[I] + '"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-    Sleep(2000); // Give services time to stop gracefully
-    
-    // Remove service
-    Log('Removing service: ' + Services[I]);
-    Exec('sc.exe', 'delete "' + Services[I] + '"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    NssmPath := 'C:\Program Files\AIHub\nssm.exe';
+    Log('NSSM not found at install path, trying default: ' + NssmPath);
   end;
   
-  // Additional wait to ensure all services are fully stopped
+  // =========================================================================
+  // PHASE 1: Stop services using NSSM (preferred) or sc.exe (fallback)
+  // =========================================================================
+  if FileExists(NssmPath) then
+  begin
+    Log('Using NSSM to stop services: ' + NssmPath);
+    for I := 0 to 7 do
+    begin
+      Log('Stopping service via NSSM: ' + Services[I]);
+      Exec(NssmPath, 'stop ' + Services[I], '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+      Log('  Result: ' + IntToStr(ResultCode));
+    end;
+  end
+  else
+  begin
+    Log('WARNING: NSSM not found, using sc.exe to stop services');
+    for I := 0 to 7 do
+    begin
+      Log('Stopping service via sc.exe: ' + Services[I]);
+      Exec('sc.exe', 'stop "' + Services[I] + '"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+      Log('  Result: ' + IntToStr(ResultCode));
+    end;
+  end;
+  
+  // Give services time to stop gracefully
+  Log('Waiting 5 seconds for services to stop gracefully...');
+  Sleep(5000);
+  
+  // =========================================================================
+  // PHASE 2: Force kill ALL processes BEFORE removing services
+  // This is critical - ensures no orphaned processes remain
+  // =========================================================================
+  Log('Force killing any remaining processes...');
+  for I := 0 to 7 do
+  begin
+    Exec('taskkill.exe', '/F /IM ' + Executables[I], '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    if ResultCode = 0 then
+      Log('  Killed: ' + Executables[I])
+    else if ResultCode <> 128 then  // 128 = process not found (OK)
+      Log('  ' + Executables[I] + ' taskkill result: ' + IntToStr(ResultCode));
+  end;
+  
+  // Also kill any lingering nssm.exe processes that might be holding handles
+  Exec('taskkill.exe', '/F /IM nssm.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  
+  // Wait for processes to fully terminate
   Sleep(3000);
+  
+  // =========================================================================
+  // PHASE 3: Remove service registrations
+  // =========================================================================
+  if FileExists(NssmPath) then
+  begin
+    Log('Removing services via NSSM...');
+    for I := 0 to 7 do
+    begin
+      Log('Removing service: ' + Services[I]);
+      Exec(NssmPath, 'remove ' + Services[I] + ' confirm', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+      Log('  Result: ' + IntToStr(ResultCode));
+    end;
+  end
+  else
+  begin
+    Log('Removing services via sc.exe...');
+    for I := 0 to 7 do
+    begin
+      Log('Removing service: ' + Services[I]);
+      Exec('sc.exe', 'delete "' + Services[I] + '"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+      Log('  Result: ' + IntToStr(ResultCode));
+    end;
+  end;
+  
+  // Final wait to ensure Windows releases all handles
+  Sleep(2000);
+  
+  Log('========================================');
+  Log('SERVICE CLEANUP COMPLETE');
+  Log('========================================');
 end;
 
 function InitializeSetup(): Boolean;
@@ -271,7 +413,7 @@ begin
     if ExistingInstallPath = '' then
     begin
       // Try default location
-      ExistingInstallPath := ExpandConstant('{DefaultDirName}');
+      ExistingInstallPath := ExpandConstant('{autopf}\AIHub');
       Log('Could not read install path from registry, using default: ' + ExistingInstallPath);
     end
     else
@@ -315,10 +457,9 @@ begin
       Log('Successfully read API key from .env file (first 8 chars): ' + Copy(ExistingApiKey, 1, 8) + '...');
     end;
     
-    // Stop all services BEFORE the installation begins
-    Log('Stopping services before upgrade...');
-    StopAndRemoveServices();
-    Log('Services stopped successfully');
+    // NOTE: Services will be stopped later in PrepareToInstall(), 
+    // AFTER the user has committed to the installation.
+    // This prevents breaking the app if the user cancels the wizard.
     
   end
   else
@@ -469,6 +610,26 @@ begin
     Log('Skipping configuration page - this is an upgrade');
 end;
 
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  // This function is called AFTER the user clicks Install,
+  // but BEFORE files are copied. This is the safe time to stop services.
+  Result := '';  // Empty string means continue with installation
+  NeedsRestart := False;
+  
+  if IsUpgrade then
+  begin
+    Log('========================================');
+    Log('STOPPING SERVICES BEFORE FILE UPDATE');
+    Log('========================================');
+    
+    // Now it's safe to stop services - user has committed to the upgrade
+    StopAndRemoveServices();
+    
+    Log('Services stopped successfully - proceeding with file update');
+  end;
+end;
+
 procedure InstallServices();
 var
   ResultCode: Integer;
@@ -560,7 +721,7 @@ begin
   ConfigureServiceRecovery('AIHubJobScheduler');
   Exec(ExpandConstant('{app}\nssm.exe'), 'start AIHubJobScheduler', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Log('AIHubJobScheduler service started');
-  
+
   // Register the vector API service
   ShellExec('', ExpandConstant('{app}\nssm.exe'),
     'install AIHubVectorAPI "' + ExpandConstant('{app}\wsgi_vector_api.exe') + '"',
@@ -622,6 +783,9 @@ begin
   Log('AIHubExecutorService service started');
   
   Log('All services installed and started successfully');
+  
+  // Get the configured port for browser launch
+  GetConfiguredPort();
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
@@ -630,6 +794,7 @@ var
   ConfigText: String;
   EnvConfigFile: String;
   AppRootVal: String;
+  ResultCode: Integer;
 begin
   if CurStep = ssPostInstall then
   begin
@@ -696,15 +861,6 @@ begin
                mbError, MB_OK);
       end;
       
-      // --- VERIFY: COMMAND_GENERATOR_DEPLOYMENT ---
-      //if not EnsureEnvKeyExists(EnvConfigFile, 'COMMAND_GENERATOR_DEPLOYMENT', '') then
-      //begin
-        // Don't abort the whole install; just warn. Services can still run,
-        //MsgBox('Warning: Failed to write COMMAND_GENERATOR_DEPLOYMENT to .env.' + #13#10 +
-               //'You may need to add it manually',
-               //mbError, MB_OK);
-      //end;
-      
       // --- VERIFY: USE_WORKFLOW_EXECUTOR_SERVICE ---
       if not EnsureEnvKeyExists(EnvConfigFile, 'USE_WORKFLOW_EXECUTOR_SERVICE', 'true') then
       begin
@@ -770,6 +926,16 @@ begin
 
     // Install services (works for both new installs and upgrades)
     InstallServices();
+    
+    // For upgrades, show completion message and open browser
+    if IsUpgrade then
+    begin
+      Log('Upgrade complete - opening browser');
+      // Small delay to ensure services are fully started
+      Sleep(60000);
+      // Open browser to the application
+      ShellExec('open', 'http://localhost:' + ConfiguredPort, '', '', SW_SHOWNORMAL, ewNoWait, ResultCode);
+    end;
   end;
 end;
 
